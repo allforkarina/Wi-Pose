@@ -368,30 +368,48 @@ def _fig3_axial_attention(
                 axes[row_idx, c].text(0.5, 0.5, "N/A", ha="center", va="center")
             continue
 
-        # weights: [B*N, num_heads, N, N] → take first sample
-        w = weights[0].cpu().numpy()  # [num_heads, N, N]
-        num_heads = w.shape[0]
-        avg_w = w.mean(axis=0)  # [N, N]
+        # weights: [B*t, num_heads, L, L] (per‑head) or [B*t, L, L] (averaged)
+        w = weights[0].cpu().numpy()  # [num_heads, L, L] or [L, L]
+        if w.ndim not in (2, 3):
+            print(f"    [WARN] Unexpected attention weight shape: {w.shape}")
+            for c in range(5):
+                axes[row_idx, c].axis("off")
+            continue
+
+        # Detect averaged vs per‑head
+        if w.ndim == 2:
+            # Already averaged across heads — show as single panel
+            num_heads = 0
+            avg_w = w  # [L, L]
+        else:
+            num_heads = w.shape[0]
+            if num_heads < 1:
+                print(f"    [WARN] num_heads={num_heads} for {label} attention")
+                for c in range(5):
+                    axes[row_idx, c].axis("off")
+                continue
+            avg_w = w.mean(axis=0)  # [L, L]
 
         # column 0: average
         _draw_attn_panel(
             axes[row_idx, 0], avg_w,
-            title=f"{label} attn (avg {num_heads} heads)",
+            title=f"{label} attn (avg {max(num_heads, 1)} heads)",
             token_label="subcarrier token" if label == "Spatial" else "time token",
             n=n_tokens,
         )
 
-        # columns 1–4: individual heads (up to 4)
-        for h in range(min(4, num_heads)):
-            _draw_attn_panel(
-                axes[row_idx, 1 + h], w[h],
-                title=f"{label} head {h + 1}",
-                token_label="subcarrier token" if label == "Spatial" else "time token",
-                n=n_tokens,
-            )
+        # columns 1–4: individual heads (up to 4); skip if averaged
+        if num_heads > 0:
+            for h in range(min(4, num_heads)):
+                _draw_attn_panel(
+                    axes[row_idx, 1 + h], w[h],
+                    title=f"{label} head {h + 1}",
+                    token_label="subcarrier token" if label == "Spatial" else "time token",
+                    n=n_tokens,
+                )
 
         # hide unused head columns
-        for h in range(num_heads, 4):
+        for h in range(num_heads if num_heads > 0 else 1, 4):
             axes[row_idx, 1 + h].axis("off")
 
     fig.suptitle(
@@ -410,6 +428,11 @@ def _draw_attn_panel(
     n: int,
 ) -> None:
     """Draw one attention matrix + entropy bar on a panel."""
+    if matrix.ndim != 2:
+        print(f"    [WARN] _draw_attn_panel received ndim={matrix.ndim} shape={matrix.shape} — skipping")
+        ax.axis("off")
+        return
+
     im = ax.imshow(matrix, cmap="viridis", aspect="auto", vmin=0)
     ax.set_title(title, fontsize=9)
     ax.set_xlabel(token_label)

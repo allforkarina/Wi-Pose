@@ -873,6 +873,35 @@ def _fig6_global_correlation(
 
 
 # ---------------------------------------------------------------------------
+# Shared thumbnail helper for composite figures
+# ---------------------------------------------------------------------------
+
+_THUMBNAIL_MAX_PX = 600
+
+
+def _thumbnail(img_path: Path) -> Image.Image | None:
+    """Load and resize to a uniform thumbnail; return None on failure."""
+    from PIL import Image
+
+    try:
+        img = Image.open(img_path)
+    except Exception:
+        return None
+    w, h = img.size
+    if max(w, h) > _THUMBNAIL_MAX_PX:
+        scale = _THUMBNAIL_MAX_PX / max(w, h)
+        img = img.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+    return img
+
+
+def _imshow_thumb(ax: plt.Axes, img_path: Path) -> None:
+    """Load thumbnail and display it with aspect='auto' (fill subplot)."""
+    img = _thumbnail(img_path)
+    if img is not None:
+        ax.imshow(img, aspect="auto")
+
+
+# ---------------------------------------------------------------------------
 # Overview composite
 # ---------------------------------------------------------------------------
 
@@ -882,7 +911,11 @@ def _build_overview(
     output_dir: Path,
     decoder_type: str,
 ) -> None:
-    """Build a 3×3 overview thumbnail composite of all figures."""
+    """Build an overview thumbnail composite of all figures.
+
+    Dynamically sizes the grid so each panel preserves its image's aspect
+    ratio.  Uses shared thumbnail helper for consistent sizing.
+    """
     try:
         from PIL import Image
     except ImportError:
@@ -903,50 +936,68 @@ def _build_overview(
         fig_names.append("fig5b_paf_direction")
         fig_names.append("fig6_feature_pose_correlation")
 
-    # Collect paths: take first sample that has each figure
-    img_paths: list[Path | None] = []
+    # Collect thumbnail paths
+    thumb_paths: list[Path | None] = []
     for name in fig_names:
         if "fig6" in name:
             p = output_dir / "_global" / f"{name}.png"
-            if p.exists():
-                img_paths.append(p)
-            else:
-                img_paths.append(None)
+            thumb_paths.append(p if p.exists() else None)
         else:
             found = False
             for d in sample_dirs:
                 candidate = d / f"{name}.png"
                 if candidate.exists():
-                    img_paths.append(candidate)
+                    thumb_paths.append(candidate)
                     found = True
                     break
             if not found:
-                img_paths.append(None)
+                thumb_paths.append(None)
 
-    valid = [p for p in img_paths if p is not None]
+    valid = [p for p in thumb_paths if p is not None]
     if len(valid) < 3:
         return
 
-    fig, axes = plt.subplots(3, 3, figsize=(18, 18))
-    axes = axes.flatten()
+    # Measure actual aspect ratios of thumbnails
+    aspects: list[float] = []
+    thumb_imgs: list[Image.Image] = []
+    for p in thumb_paths:
+        img = _thumbnail(p) if p is not None else None
+        thumb_imgs.append(img)
+        if img is not None:
+            aspects.append(img.width / max(img.height, 1))
+        else:
+            aspects.append(1.0)
 
-    for idx, (ax, img_path) in enumerate(zip(axes, img_paths)):
-        if img_path is None:
+    # Layout: figure width is fixed; row heights adapt to content
+    ncols = 3
+    nrows = int(np.ceil(len(thumb_paths) / ncols))
+    panel_w = _FIGURE_WIDTH / ncols if _FIGURE_WIDTH else 6.0
+
+    # Build per-row heights based on the flattest subplot in each row
+    row_heights: list[float] = []
+    for r in range(nrows):
+        row_aspects = aspects[r * ncols:(r + 1) * ncols]
+        # flattest = smallest aspect (widest image needs most height)
+        min_asp = min(row_aspects) if row_aspects else 1.0
+        row_heights.append(panel_w / max(min_asp, 0.2))
+    total_h = sum(row_heights) + 1.0  # +1" for suptitle margin
+
+    fig, axes = plt.subplots(nrows, ncols, figsize=(panel_w * ncols, total_h))
+    if nrows == 1:
+        axes = axes.reshape(1, -1)
+
+    for idx in range(nrows * ncols):
+        r, c = divmod(idx, ncols)
+        ax = axes[r, c]
+        if idx >= len(thumb_paths) or thumb_imgs[idx] is None:
             ax.axis("off")
             continue
-        try:
-            img = Image.open(img_path)
-            ax.imshow(img)
-        except Exception:
-            pass
+        ax.imshow(thumb_imgs[idx], aspect="auto")
         ax.set_title(f"Fig {idx + 1}", fontsize=12, fontweight="bold", loc="left")
         ax.axis("off")
 
-    # hide unused axes
-    for idx in range(len(img_paths), 9):
-        axes[idx].axis("off")
-
     fig.suptitle("Feature Visualization Overview", fontsize=14, fontweight="bold")
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
     _save_fig(fig, output_dir / "overview")
 
 
@@ -1006,7 +1057,13 @@ def _build_action_composites(
         # Build the composite: rows = figure types, cols = environment samples
         n_cols = len(envs_to_show)
         n_rows = 2  # fig0 + fig3
-        fig, axes = plt.subplots(n_rows, n_cols, figsize=(9 * n_cols, 8 * n_rows))
+        panel_w = _FIGURE_WIDTH / n_cols if _FIGURE_WIDTH else 6.0
+        panel_h = panel_w  # square-ish panels, imshow with aspect='auto' handles fill
+
+        fig, axes = plt.subplots(
+            n_rows, n_cols,
+            figsize=(panel_w * n_cols, panel_h * n_rows + 0.8),
+        )
         if n_cols == 1:
             axes = axes.reshape(-1, 1)
 
@@ -1019,8 +1076,7 @@ def _build_action_composites(
                 ax = axes[r, c]
                 img_path = sp / f"{fname}.png"
                 if img_path.exists():
-                    img = Image.open(img_path)
-                    ax.imshow(img)
+                    _imshow_thumb(ax, img_path)
                 ax.set_title(
                     f"{envs_to_show[c]} — {f_label}",
                     fontsize=10, fontweight="bold",
@@ -1031,7 +1087,7 @@ def _build_action_composites(
             f"Action: {action}  ({n_envs} environments sampled)",
             fontsize=14, fontweight="bold",
         )
-        _apply_spacing(fig)
+        fig.tight_layout(rect=[0, 0, 1, 0.94])
         _save_fig(fig, actions_dir / f"composite_{action}")
 
 

@@ -314,10 +314,12 @@ def _fig1_antenna_channel(
 
         # cross-corr overlay between adjacent channels
         if ch < 2:
-            corr = np.array([
-                np.corrcoef(mixer[ch, sc], mixer[ch + 1, sc])[0, 1]
-                for sc in range(114)
-            ])
+            with np.errstate(invalid="ignore"):
+                corr = np.array([
+                    np.corrcoef(mixer[ch, sc], mixer[ch + 1, sc])[0, 1]
+                    for sc in range(114)
+                ])
+            corr = np.nan_to_num(corr, nan=0.0)
             ax_corr = ax.twinx()
             ax_corr.plot(corr, np.arange(114), color="#E05C30",
                          linewidth=1.0, alpha=0.7)
